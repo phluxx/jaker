@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,18 +17,25 @@ const defaultPort = 8080
 const defaultStorageDir = "./storage"
 const maxUploadSize = 5 * 1024 * 1024 // 5 MB
 
+var storageDir string // Define storageDir as a global variable
+
 func main() {
 	// Parse command-line flags
 	var port int
-	var storageDir, certFile, keyFile string
+	var certFile, keyFile, storageDirFlag string
 	var daemonize bool
 
 	flag.IntVar(&port, "port", defaultPort, "Port number to listen on")
-	flag.StringVar(&storageDir, "storage-dir", defaultStorageDir, "Storage directory for uploaded files")
+	flag.StringVar(&storageDirFlag, "storage-dir", defaultStorageDir, "Storage directory for uploaded files")
 	flag.StringVar(&certFile, "cert-file", "", "Path to SSL certificate file")
 	flag.StringVar(&keyFile, "key-file", "", "Path to SSL private key file")
 	flag.BoolVar(&daemonize, "daemon", false, "Run as a daemon")
 	flag.Parse()
+
+	// Use the command-line flag value for storageDir, if provided
+	if storageDirFlag != "" {
+		storageDir = storageDirFlag
+	}
 
 	// Check if the storage directory exists, and if not, ask the user if they want to create it
 	if _, err := os.Stat(storageDir); os.IsNotExist(err) {
@@ -37,11 +45,10 @@ func main() {
 		if strings.ToLower(strings.TrimSpace(answer)) == "y" {
 			err = os.MkdirAll(storageDir, 0755)
 			if err != nil {
-				fmt.Println("Error creating the storage directory:", err)
-				os.Exit(1)
+				log.Fatalf("Error creating the storage directory: %v", err)
 			}
 		} else {
-			os.Exit(1)
+			log.Fatalln("Storage directory not found. Exiting.")
 		}
 	}
 
@@ -67,11 +74,13 @@ func main() {
 			// Daemonize the server by forking a new process
 			// and detach the child process from the terminal
 			daemonizeServer()
+		} else {
+			fmt.Println("Running in the foreground...")
 		}
 
 		err := server.ListenAndServeTLS(certFile, keyFile)
 		if err != nil {
-			fmt.Println("Error starting the server:", err)
+			log.Fatalf("Error starting the server with SSL/TLS: %v", err)
 		}
 	} else {
 		fmt.Printf("Starting server on port %d...\n", port)
@@ -79,11 +88,13 @@ func main() {
 			// Daemonize the server by forking a new process
 			// and detach the child process from the terminal
 			daemonizeServer()
+		} else {
+			fmt.Println("Running in the foreground...")
 		}
 
 		err := http.ListenAndServe(addr, nil)
 		if err != nil {
-			fmt.Println("Error starting the server:", err)
+			log.Fatalf("Error starting the server: %v", err)
 		}
 	}
 }
@@ -109,12 +120,14 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
 		http.Error(w, "File too large", http.StatusBadRequest)
+		log.Printf("Error parsing form: %v", err)
 		return
 	}
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "Invalid file", http.StatusBadRequest)
+		log.Printf("Error retrieving file: %v", err)
 		return
 	}
 	defer file.Close()
@@ -123,9 +136,20 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.FormValue("path")
 
 	fileName := filepath.Base(path)
-	dst, err := os.Create(filepath.Join(defaultStorageDir, bucket, fileName))
+	// Create the bucket path if it doesn't exist
+	bucketPath := filepath.Join(storageDir, bucket)
+	if _, err := os.Stat(bucketPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(bucketPath, 0755); err != nil {
+			http.Error(w, "Error creating bucket path", http.StatusInternalServerError)
+			log.Printf("Error creating bucket path: %v", err)
+			return
+		}
+	}
+
+	dst, err := os.Create(filepath.Join(bucketPath, fileName))
 	if err != nil {
 		http.Error(w, "Error saving file", http.StatusInternalServerError)
+		log.Printf("Error creating file: %v", err)
 		return
 	}
 	defer dst.Close()
@@ -133,6 +157,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	_, err = io.Copy(dst, file)
 	if err != nil {
 		http.Error(w, "Error saving file", http.StatusInternalServerError)
+		log.Printf("Error copying file: %v", err)
 		return
 	}
 
@@ -156,6 +181,6 @@ func serveImageHandler(w http.ResponseWriter, r *http.Request) {
 	bucket := parts[0]
 	objectName := parts[1]
 
-	filePath := filepath.Join(defaultStorageDir, bucket, objectName)
+	filePath := filepath.Join(storageDir, bucket, objectName)
 	http.ServeFile(w, r, filePath)
 }
